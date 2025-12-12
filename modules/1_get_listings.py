@@ -1,20 +1,27 @@
-"""Пошук товару на brain.com.ua та отримання URL першого результату."""
-from load_django import *  # noqa: F401,F403 - необхідно ініціалізувати Django
-from parser_app.models import *  # noqa: F401,F403 - моделі можуть знадобитися пізніше
+"""Find product on brain.com.ua and get URL of first result."""
+from load_django import *  # noqa: F401,F403 - initialize Django
+from parser_app.models import *  # noqa: F401,F403 - models may be needed later
 import argparse
 from dataclasses import dataclass
 from typing import Optional
 
 from selenium import webdriver
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoSuchElementException,
+    ElementClickInterceptedException,
+    ElementNotInteractableException,
+)
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+import time
 
 
 SEARCH_INPUT_SELECTOR = (By.CSS_SELECTOR, "input.quick-search-input")
-SEARCH_BUTTON_XPATH = "/html/body/header/div[2]/div/div/div[3]/div[1]/form/input[2]"
-FIRST_RESULT_XPATH = "/html/body/div[4]/div[1]/div/div/div[2]/div/div[2]/div[2]/div[1]/div/div[1]/div[1]/div[1]/div"
+SEARCH_BUTTON_SELECTOR = (By.CSS_SELECTOR, "input.qsr-submit")
+FIRST_RESULT_SELECTOR = (By.CSS_SELECTOR, ".br-pp.br-pp-ex.goods-block__item[data-pid]")
 
 
 @dataclass
@@ -26,7 +33,7 @@ def build_driver() -> webdriver.Chrome:
     options = Options()
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--start-maximized")
-    # З UI: headless не використовується
+    # With UI: headless mode not used
     return webdriver.Chrome(options=options)
 
 
@@ -35,17 +42,66 @@ def find_product_url(query: str, timeout: int = 20) -> Optional[SearchResult]:
     try:
         driver.get("https://brain.com.ua/")
         wait = WebDriverWait(driver, timeout)
+        time.sleep(2.0)
 
+        # Wait for search input to be present and visible
         search_input = wait.until(EC.presence_of_element_located(SEARCH_INPUT_SELECTOR))
-        search_input.clear()
-        search_input.send_keys(query)
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", search_input)
+        time.sleep(0.5)
+        
+        # Click to focus
+        try:
+            search_input.click()
+        except (ElementNotInteractableException, ElementClickInterceptedException):
+            driver.execute_script("arguments[0].click();", search_input)
+        
+        time.sleep(0.3)
+        
+        # Clear and send keys using JavaScript as fallback
+        try:
+            search_input.clear()
+        except (ElementNotInteractableException, ElementClickInterceptedException):
+            pass
+        
+        # Use JavaScript to set value if send_keys fails
+        try:
+            search_input.send_keys(query)
+        except (ElementNotInteractableException, ElementClickInterceptedException):
+            driver.execute_script("arguments[0].value = arguments[1];", search_input, query)
+            # Trigger input event
+            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", search_input)
+        
+        time.sleep(0.5)
 
-        search_button = wait.until(EC.element_to_be_clickable((By.XPATH, SEARCH_BUTTON_XPATH)))
-        search_button.click()
+        search_button = wait.until(EC.element_to_be_clickable(SEARCH_BUTTON_SELECTOR))
+        try:
+            search_button.click()
+        except (ElementNotInteractableException, ElementClickInterceptedException):
+            driver.execute_script("arguments[0].click();", search_button)
+        
+        time.sleep(2.0)  # Wait for search results to load
 
-        # Очікуємо перший товар у видачі та клікаємо по ньому
-        first_result = wait.until(EC.element_to_be_clickable((By.XPATH, FIRST_RESULT_XPATH)))
-        first_result.click()
+        # Wait for first product in results and click on it
+        first_result = wait.until(EC.presence_of_element_located(FIRST_RESULT_SELECTOR))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", first_result)
+        time.sleep(0.5)
+        
+        # Get the link from the first product card
+        try:
+            product_link = first_result.find_element(By.CSS_SELECTOR, "a[href*='/ukr/']")
+            product_url = product_link.get_attribute("href")
+            if product_url:
+                driver.get(product_url)
+                time.sleep(1.0)
+                return SearchResult(url=driver.current_url)
+        except (NoSuchElementException, AttributeError):
+            pass
+        
+        # Fallback: try to click on the card itself
+        try:
+            first_result.click()
+        except (ElementNotInteractableException, ElementClickInterceptedException):
+            driver.execute_script("arguments[0].click();", first_result)
 
         wait.until(lambda drv: drv.current_url != "https://brain.com.ua/")
         return SearchResult(url=driver.current_url)
@@ -54,16 +110,16 @@ def find_product_url(query: str, timeout: int = 20) -> Optional[SearchResult]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Пошук першого товару за назвою.")
-    parser.add_argument("query", nargs="?", default="Apple iPhone 15 128GB Black", help="Запит для пошуку")
+    parser = argparse.ArgumentParser(description="Find first product by name.")
+    parser.add_argument("query", nargs="?", default="Apple iPhone 15 128GB Black", help="Search query")
     args = parser.parse_args()
 
     result = find_product_url(args.query)
     if not result:
-        print("Не вдалося отримати результат.")
+        print("Failed to get result.")
         return
 
-    print(f"URL знайденого товару: {result.url}")
+    print(f"Found product URL: {result.url}")
 
 
 if __name__ == "__main__":

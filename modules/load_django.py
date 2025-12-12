@@ -1,4 +1,4 @@
-"""Налаштування Django оточення для самостійних скриптів у modules."""
+"""Configure Django environment for standalone scripts in modules."""
 import os
 import sys
 from pathlib import Path
